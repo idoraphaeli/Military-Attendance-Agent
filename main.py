@@ -4,10 +4,10 @@ import json
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, ConversationHandler
 from telegram.request import HTTPXRequest
 from openai import OpenAI
-import sync_service # קובץ ה-ETL והסנכרון מגוגל שיטס
+import sync_service 
 import database
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
@@ -18,9 +18,10 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ---------------------------------------------------------------------
-# תפריט הכלים המורחב (Tools Specification) עבור סוכן ה-AI שלנו
-# ---------------------------------------------------------------------
+WAITING_FOR_ID = 0
+conversation_histories = {}
+MAX_HISTORY = 10
+
 tools_specification = [
     {
         "type": "function",
@@ -131,14 +132,63 @@ tools_specification = [
         }
     }
 ]
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    chat_id = update.effective_chat.id
+    if database.is_chat_authenticated(chat_id):
+        await update.message.reply_text("אתה כבר מזוהה במערכת. שאל אותי חופשי על נוכחות, חופשות, מפקדים או סטטיסטיקות חיילים.")
+        return ConversationHandler.END
+    await update.message.reply_text("ברוך הבא לבוט החמ\"ל הפלוגתי.\nאנא הזן את המספר האישי שלך לאימות זהות:")
+    return WAITING_FOR_ID
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await update.message.reply_text("היי! הבוט שודרג לארגז כלים מלא של חמ''ל פלוגתי! 🫡\nשאל אותי חופשי על נוכחות, חופשות, מפקדים או סטטיסטיקות חיילים.")
+async def handle_id_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    personal_id = update.message.text.strip()
+    chat_id = update.effective_chat.id
+
+    soldier = database.check_personal_id(personal_id)
+    if soldier:
+        database.authenticate_chat(chat_id, soldier['personal_id'], soldier['first_name'])
+        await update.message.reply_text(
+            f"זיהוי בוצע בהצלחה, {soldier['first_name']}!\n"
+            "ברוך הבא לחמ\"ל הפלוגתי. שאל אותי חופשי על נוכחות, חופשות, מפקדים או סטטיסטיקות חיילים."
+        )
+        return ConversationHandler.END
+    else:
+        await update.message.reply_text("המספר האישי לא נמצא ברשימה המורשית. נסה שוב:")
+        return WAITING_FOR_ID
+
+async def sync_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    chat_id = update.effective_chat.id
+    if not database.is_chat_authenticated(chat_id):
+        await update.message.reply_text("⛔ אין לך הרשאה. שלח /start כדי להזדהות.")
+        return
+    msg = await update.message.reply_text("מבצע סנכרון מגוגל שיטס...")
+    run_sync_process()
+    await msg.edit_text("הסנכרון הושלם בהצלחה! הנתונים עדכניים.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user_text = update.message.text
     user_name = update.effective_user.first_name
-    
+    chat_id = update.effective_chat.id
+
+    if not database.is_chat_authenticated(chat_id):
+        if context.user_data.get('waiting_for_id'):
+            soldier = database.check_personal_id(user_text.strip())
+            if soldier:
+                database.authenticate_chat(chat_id, soldier['personal_id'], soldier['first_name'])
+                context.user_data.pop('waiting_for_id', None)
+                await update.message.reply_text(
+                    f"זיהוי בוצע בהצלחה, {soldier['first_name']}!\n"
+                    "ברוך הבא לחמ\"ל הפלוגתי. שאל אותי חופשי על נוכחות, חופשות, מפקדים או סטטיסטיקות חיילים."
+                )
+            else:
+                await update.message.reply_text("המספר האישי לא נמצא ברשימה. נסה שוב:")
+        else:
+            context.user_data['waiting_for_id'] = True
+            await update.message.reply_text(
+                "שלום! כדי להשתמש בבוט יש להזדהות.\nאנא הזן את המספר האישי שלך:"
+            )
+        return
+
     logger.info(f"Received question from {user_name}: '{user_text}'")
     waiting_message = await update.message.reply_text("מעבד נתונים בחמ''ל... 🔄")
     
@@ -176,36 +226,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 --- חוק חישוב ימי בית (סטטיסטיקה): ---
 8. כשמשתמש מבקש סיכום ימי בית או ימי חופשה של חייל, הפונקציה `get_soldier_summary_stats` כבר מחשבת ומחזירה את סך הימים (כאשר ימים ריקים וגם ימי יציאה 'י' נספרים כימים בבית). המספר שהיא מחזירה הוא הקובע הבלעדי.
+
+--- חוקי טיפול בשגיאות ותוצאות ריקות: ---
+9. אם תוצאת כלי חזרה עם רשימה ריקה או total_count שווה 0, ציין זאת במפורש: "לא נמצאו חיילים התואמים את החיפוש."
+10. אם חיפוש לפי שם החזיר תוצאה ריקה, ענה: "לא נמצא חייל בשם [שם] במערכת."
+11. אל תמציא נתונים או שמות שלא הופיעו בתוצאת הכלי. אם אין מידע - אמור זאת בפירוש.
 """
         
+        user_id = update.effective_user.id
+        history = conversation_histories.get(user_id, [])
+
+        messages = [{"role": "system", "content": system_instruction}] + history + [{"role": "user", "content": user_text}]
+
         response = openai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": user_text}
-            ],
+            messages=messages,
             tools=tools_specification,
             tool_choice="auto"
         )
-        
+
         response_message = response.choices[0].message
         tool_calls = response_message.tool_calls
-        
+
         if tool_calls:
             logger.info(f"AI selected {len(tool_calls)} tool(s) to execute.")
-            messages = [
-                {"role": "system", "content": system_instruction},
-                {"role": "user", "content": user_text},
-                response_message
-            ]
+            messages = messages + [response_message]
             
             for tool_call in tool_calls:
                 function_name = tool_call.function.name
                 function_args = json.loads(tool_call.function.arguments)
                 
-                # --- ניתוב דינמי לפונקציה המתאימה ב-Database ---
                 if function_name == "get_present_soldiers_by_date_and_dept":
-                    db_result = database.get_present_soldiers_by_date_and_dept(function_args.get("date"), function_args.get("department"))
+                    soldiers = database.get_present_soldiers_by_date_and_dept(function_args.get("date"), function_args.get("department"))
+                    db_result = {"total_count": len(soldiers), "soldiers": soldiers}
 
                 elif function_name == "get_company_presence_stats":
                     date_arg = function_args.get("date")
@@ -224,7 +277,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     elif category_arg == 'commanders':
                         roles_filter = ['מפקד']
                     
-                    db_result = database.count_present_soldiers_by_roles(date_arg, roles_filter)
+                    soldiers = database.count_present_soldiers_by_roles(date_arg, roles_filter)
+                    db_result = {"total_count": len(soldiers), "soldiers": soldiers}
                 
                 elif function_name == "get_department_status_for_date":
                     date_arg = function_args.get("date")
@@ -263,10 +317,14 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             ai_reply = response_message.content
             
         await waiting_message.edit_text(ai_reply)
-        
+
+        history.append({"role": "user", "content": user_text})
+        history.append({"role": "assistant", "content": ai_reply})
+        conversation_histories[user_id] = history[-MAX_HISTORY:]
+
     except Exception as e:
         logger.error(f"Error in handle_message: {e}")
-        await waiting_message.edit_text("חלה שגיאה פנימית בעיבוד השאילתה. ❌")
+        await waiting_message.edit_text(f"❌ שגיאה בעיבוד השאילתה: {str(e)}")
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.error(f"⚠️ שגיאה גלובלית: {context.error}")
@@ -276,12 +334,19 @@ def run_sync_process():
     logger.info("--- מתחיל סנכרון אוטומטי מגוגל שיטס ---")
     try:
         database.init_db()
-        soldiers_data = sync_service.get_clean_pluga_data() 
+        soldiers_data = sync_service.get_clean_pluga_data()
         if soldiers_data:
             database.save_soldiers_to_db(soldiers_data)
-            logger.info("--- הסנכרון האוטומטי הסתיים בהצלחה! ---")
         else:
-            logger.error("הסנכרון האוטומטי נכשל - לא התקבלו נתונים.")
+            logger.error("סנכרון לוח הזמנים נכשל - לא התקבלו נתונים.")
+
+        authorized_data = sync_service.get_authorized_soldiers()
+        if authorized_data:
+            database.save_authorized_soldiers(authorized_data)
+        else:
+            logger.error("סנכרון רשימת המורשים נכשל - לא התקבלו נתונים.")
+
+        logger.info("--- הסנכרון האוטומטי הסתיים בהצלחה! ---")
     except Exception as e:
         logger.error(f"שגיאה קריטית בריצת מנגנון הסנכרון ברקע: {e}")
 
@@ -293,7 +358,15 @@ def main() -> None:
     request_config = HTTPXRequest(connect_timeout=20.0, read_timeout=20.0)
     application = Application.builder().token(TELEGRAM_TOKEN).request(request_config).build()
     
-    application.add_handler(CommandHandler("start", start))
+    auth_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            WAITING_FOR_ID: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_id_input)]
+        },
+        fallbacks=[CommandHandler("start", start)]
+    )
+    application.add_handler(auth_handler)
+    application.add_handler(CommandHandler("sync", sync_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     application.add_error_handler(error_handler)
     

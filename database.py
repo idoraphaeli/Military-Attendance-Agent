@@ -7,10 +7,6 @@ logger = logging.getLogger(__name__)
 DB_NAME = "pluga_shavzak.db"
 
 def normalize_text(text: str) -> str:
-    """
-    מנרמלת טקסט: מורידה גרשיים, מרכאות, מקפים ורווחים מיותרים 
-    כדי לאפשר השוואה חסינה (למשל: מ"מ -> ממ, חפ'ק -> חפק)
-    """
     if not text:
         return ""
     cleaned = text.replace('"', '').replace("'", "").replace("-", "")
@@ -28,6 +24,20 @@ def init_db():
             role TEXT,
             schedule_data TEXT,
             UNIQUE(first_name, last_name)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS authorized_soldiers (
+            personal_id TEXT PRIMARY KEY,
+            first_name TEXT NOT NULL,
+            last_name TEXT NOT NULL
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS authenticated_chats (
+            chat_id INTEGER PRIMARY KEY,
+            personal_id TEXT NOT NULL,
+            first_name TEXT NOT NULL
         )
     """)
     conn.commit()
@@ -69,24 +79,6 @@ def save_soldiers_to_db(soldiers_list):
     finally:
         conn.close()
 
-def get_soldiers_by_department(department: str):
-    conn = sqlite3.connect(DB_NAME)
-    cursor = conn.cursor()
-    cursor.execute("SELECT first_name || ' ' || last_name, role, department, schedule_data FROM soldiers")
-    rows = cursor.fetchall()
-    conn.close()
-    
-    target_dept = normalize_text(department)
-    results = []
-    for row in rows:
-        if target_dept in normalize_text(row[2]) or normalize_text(row[2]) in target_dept:
-            results.append({
-                "name": row[0],
-                "role": row[1],
-                "schedule": json.loads(row[3])
-            })
-    return results
-
 def get_soldier_by_name(name: str):
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
@@ -108,7 +100,6 @@ def get_soldier_by_name(name: str):
     return results
 
 def get_present_soldiers_by_date_and_dept(date: str, department: str = None):
-    """שודרג: שליפת נוכחים עם סינון מחלקה מנורמל וחסין גרשיים"""
     conn = sqlite3.connect(DB_NAME)
     cursor = conn.cursor()
     cursor.execute("SELECT first_name || ' ' || last_name, role, department, schedule_data FROM soldiers")
@@ -194,7 +185,6 @@ def get_all_commanders_status(date: str):
         name, dept, role, schedule_json = row[0], row[1], row[2], row[3]
         role_norm = normalize_text(role)
         
-        # סינון סגל מנורמל וחסין
         if role_norm in ['מפ', 'ממ', 'מפקד']:
             schedule = json.loads(schedule_json)
             status_on_date = schedule.get(date, '1')
@@ -271,3 +261,53 @@ def count_present_soldiers_by_roles(date: str, roles_list: list = None):
                 matching_soldiers.append({"name": name, "role": role, "department": dept})
                 
     return matching_soldiers
+
+def save_authorized_soldiers(authorized_dict: dict):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    try:
+        cursor.execute("DELETE FROM authorized_soldiers")
+        for personal_id, info in authorized_dict.items():
+            cursor.execute(
+                "INSERT INTO authorized_soldiers (personal_id, first_name, last_name) VALUES (?, ?, ?)",
+                (personal_id, info['first_name'], info['last_name'])
+            )
+        conn.commit()
+        logger.info(f"נשמרו {len(authorized_dict)} חיילים מורשים בבסיס הנתונים.")
+    except Exception as e:
+        logger.error(f"שגיאה בשמירת רשימת המורשים: {e}")
+        conn.rollback()
+    finally:
+        conn.close()
+
+def check_personal_id(personal_id: str):
+    """בודקת אם מספר אישי קיים ברשימה המורשית. מחזירה מידע על החייל או None."""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT personal_id, first_name, last_name FROM authorized_soldiers WHERE personal_id = ?",
+        (personal_id.strip(),)
+    )
+    row = cursor.fetchone()
+    conn.close()
+    if row:
+        return {"personal_id": row[0], "first_name": row[1], "last_name": row[2]}
+    return None
+
+def is_chat_authenticated(chat_id: int) -> bool:
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT 1 FROM authenticated_chats WHERE chat_id = ?", (chat_id,))
+    result = cursor.fetchone()
+    conn.close()
+    return result is not None
+
+def authenticate_chat(chat_id: int, personal_id: str, first_name: str):
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute(
+        "INSERT OR REPLACE INTO authenticated_chats (chat_id, personal_id, first_name) VALUES (?, ?, ?)",
+        (chat_id, personal_id, first_name)
+    )
+    conn.commit()
+    conn.close()
