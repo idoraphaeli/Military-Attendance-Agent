@@ -6,9 +6,9 @@ A Telegram-based AI agent designed for military company headquarters, enabling c
 
 ## Screenshots
 
-| Authentication | Presence Query | Department Status |
-|---|---|---|
-| ![Auth](screenshots/auth.jpg) | ![Presence](screenshots/presence.jpg) | ![Department](screenshots/department.jpg) |
+| Authentication | Department Status |
+|---|---|
+| ![Auth](screenshots/auth.jpg) | ![Department](screenshots/department.jpg) |
 
 ---
 
