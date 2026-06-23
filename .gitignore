@@ -1,0 +1,13 @@
+# Environment & secrets
+.env
+google_credentials.json
+
+# Database
+pluga_shavzak.db
+
+# Virtual environment
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
