@@ -311,3 +311,150 @@ def authenticate_chat(chat_id: int, personal_id: str, first_name: str):
     )
     conn.commit()
     conn.close()
+
+
+def is_date_in_range(date: str) -> bool:
+    """בודקת אם תאריך קיים בטווח הנתונים של הגיליון"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT schedule_data FROM soldiers LIMIT 1")
+    row = cursor.fetchone()
+    conn.close()
+    if not row:
+        return False
+    schedule = json.loads(row[0])
+    return date in [k for k in schedule.keys() if '/' in k]
+
+
+def get_fairness_report(department: str = None):
+    """דוח הוגנות ימי חופשה — ממוין מהכי הרבה לכי הפחות"""
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT first_name || ' ' || last_name, department, role, schedule_data FROM soldiers")
+    rows = cursor.fetchall()
+    conn.close()
+
+    target_dept = normalize_text(department) if department else None
+    results = []
+
+    for row in rows:
+        name, dept, role, schedule_json = row[0], row[1], row[2], row[3]
+
+        if target_dept:
+            if target_dept not in normalize_text(dept) and normalize_text(dept) not in target_dept:
+                continue
+
+        schedule = json.loads(schedule_json)
+        vacation_days = sum(1 for k, v in schedule.items() if '/' in k and v in ('', 'י'))
+
+        results.append({
+            "name": name,
+            "department": dept,
+            "role": role,
+            "vacation_days": vacation_days
+        })
+
+    results.sort(key=lambda x: x['vacation_days'], reverse=True)
+    return results
+
+
+def get_soldier_next_leave(name: str):
+    """מוצאת את תאריך היציאה הקרובה הביתה של חייל ספציפי"""
+    from datetime import datetime
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT first_name, last_name, department, role, schedule_data FROM soldiers")
+    rows = cursor.fetchall()
+    conn.close()
+
+    search_name = normalize_text(name)
+    now = datetime.now()
+    today = (now.month, now.day)
+
+    for row in rows:
+        full_name_norm = normalize_text(f"{row[0]} {row[1]}")
+        if search_name not in full_name_norm and normalize_text(row[0]) not in search_name and normalize_text(row[1]) not in search_name:
+            continue
+
+        schedule = json.loads(row[4])
+
+        date_keys = []
+        for k in schedule.keys():
+            if '/' in k:
+                try:
+                    day, month = int(k.split('/')[0]), int(k.split('/')[1])
+                    date_keys.append((month, day, k))
+                except:
+                    continue
+        date_keys.sort()
+
+        next_departure = None
+        next_return = None
+
+        for i, (month, day, key) in enumerate(date_keys):
+            if (month, day) >= today and schedule[key] == 'י':
+                next_departure = key
+                for _, _, key2 in date_keys[i + 1:]:
+                    if schedule[key2] == 'ח':
+                        next_return = key2
+                        break
+                break
+
+        return {
+            "name": f"{row[0]} {row[1]}",
+            "department": row[2],
+            "role": row[3],
+            "next_departure": next_departure or "לא נמצאה יציאה קרובה בלוח הזמנים",
+            "next_return": next_return or "לא ידוע"
+        }
+
+    return None
+
+
+def get_soldiers_on_base_streak():
+    """מחזירה חיילים ממוינים לפי מספר ימי קו רצופים עד היום"""
+    from datetime import datetime
+
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("SELECT first_name || ' ' || last_name, role, department, schedule_data FROM soldiers")
+    rows = cursor.fetchall()
+    conn.close()
+
+    now = datetime.now()
+    today = (now.month, now.day)
+    results = []
+
+    for row in rows:
+        name, role, dept, schedule_json = row[0], row[1], row[2], row[3]
+        schedule = json.loads(schedule_json)
+
+        date_keys = []
+        for k in schedule.keys():
+            if '/' in k:
+                try:
+                    day, month = int(k.split('/')[0]), int(k.split('/')[1])
+                    if (month, day) <= today:
+                        date_keys.append((month, day, k))
+                except:
+                    continue
+        date_keys.sort(reverse=True)
+
+        streak = 0
+        for _, _, key in date_keys:
+            if schedule[key] in ('1', 'ח'):
+                streak += 1
+            else:
+                break
+
+        if streak > 0:
+            results.append({
+                "name": name,
+                "role": role,
+                "department": dept,
+                "days_on_base": streak
+            })
+
+    results.sort(key=lambda x: x['days_on_base'], reverse=True)
+    return results

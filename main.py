@@ -130,6 +130,46 @@ tools_specification = [
                 "required": ["date", "category"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_fairness_report",
+            "description": "דוח הוגנות ימי חופשה — מחזיר רשימה ממוינת של כל חיילי הפלוגה או מחלקה ספציפית לפי מספר ימי הבית שלהם, מהכי הרבה לכי הפחות. יש להשתמש בזה כששואלים 'מי קיבל הכי הרבה חופשה', 'דוח הוגנות', 'איזון ימי בית' או 'מי מגיע לצאת'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "department": {"type": "string", "description": "אופציונלי: שם המחלקה לסינון. אם לא נשלח — מחזיר לכלל הפלוגה."}
+                },
+                "required": []
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_soldier_next_leave",
+            "description": "מציאת תאריך היציאה הקרובה הביתה של חייל ספציפי ותאריך החזרה הצפוי. יש להשתמש בזה כששואלים 'מתי X יוצא הביתה', 'מתי החופשה הבאה של X' או 'מתי X חוזר'.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string", "description": "שם החייל."}
+                },
+                "required": ["name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_soldiers_on_base_streak",
+            "description": "מחזיר רשימת חיילים ממוינת לפי מספר ימי קו רצופים — מי נמצא על הקו הכי הרבה זמן ברצף עד היום. יש להשתמש בזה כששואלים 'מי על הקו הכי הרבה זמן', 'מי לא יצא הביתה', 'מי מגיע לחופשה לפי רצף ימי קו'.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -231,6 +271,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 9. אם תוצאת כלי חזרה עם רשימה ריקה או total_count שווה 0, ציין זאת במפורש: "לא נמצאו חיילים התואמים את החיפוש."
 10. אם חיפוש לפי שם החזיר תוצאה ריקה, ענה: "לא נמצא חייל בשם [שם] במערכת."
 11. אל תמציא נתונים או שמות שלא הופיעו בתוצאת הכלי. אם אין מידע - אמור זאת בפירוש.
+12. אם תוצאת כלי החזירה {{"out_of_range": true}}, ענה בדיוק: "התאריך המבוקש אינו בטווח הנתונים של הגיליון — הפלוגה אינה בתעסוקה מבצעית בתאריך זה."
 """
         
         user_id = update.effective_user.id
@@ -255,16 +296,18 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             for tool_call in tool_calls:
                 function_name = tool_call.function.name
                 function_args = json.loads(tool_call.function.arguments)
-                
-                if function_name == "get_present_soldiers_by_date_and_dept":
-                    soldiers = database.get_present_soldiers_by_date_and_dept(function_args.get("date"), function_args.get("department"))
+
+                # בדיקת טווח תאריך לכל פונקציה שמקבלת date
+                date_arg = function_args.get("date")
+                if date_arg and not database.is_date_in_range(date_arg):
+                    db_result = {"out_of_range": True, "date": date_arg}
+
+                elif function_name == "get_present_soldiers_by_date_and_dept":
+                    soldiers = database.get_present_soldiers_by_date_and_dept(date_arg, function_args.get("department"))
                     db_result = {"total_count": len(soldiers), "soldiers": soldiers}
 
                 elif function_name == "get_company_presence_stats":
-                    date_arg = function_args.get("date")
                     category_arg = function_args.get("category")
-                    logger.info(f"Executing Presence Stats for date: {date_arg}, category: {category_arg}")
-                    
                     roles_filter = None
                     if category_arg == 'combat':
                         roles_filter = ['מפקד', 'לוחם', 'מ"מ', 'נהג']
@@ -276,27 +319,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                         roles_filter = ['מ"פ', 'מ"מ']
                     elif category_arg == 'commanders':
                         roles_filter = ['מפקד']
-                    
                     soldiers = database.count_present_soldiers_by_roles(date_arg, roles_filter)
                     db_result = {"total_count": len(soldiers), "soldiers": soldiers}
-                
+
                 elif function_name == "get_department_status_for_date":
-                    date_arg = function_args.get("date")
-                    dept_arg = function_args.get("department")
-                    logger.info(f"Executing Department Status query for date: {date_arg}, dept: {dept_arg}")
-                    db_result = database.get_department_status_for_date(date_arg, dept_arg)
-                    
+                    db_result = database.get_department_status_for_date(date_arg, function_args.get("department"))
+
                 elif function_name == "get_soldier_by_name":
                     db_result = database.get_soldier_by_name(function_args.get("name"))
-                    
+
                 elif function_name == "get_soldiers_by_status_and_date":
-                    db_result = database.get_soldiers_by_status_and_date(function_args.get("date"), function_args.get("status"))
-                    
+                    db_result = database.get_soldiers_by_status_and_date(date_arg, function_args.get("status"))
+
                 elif function_name == "get_soldier_summary_stats":
                     db_result = database.get_soldier_summary_stats(function_args.get("name"))
-                    
+
                 elif function_name == "get_all_commanders_status":
-                    db_result = database.get_all_commanders_status(function_args.get("date"))
+                    db_result = database.get_all_commanders_status(date_arg)
+
+                elif function_name == "get_fairness_report":
+                    db_result = database.get_fairness_report(function_args.get("department"))
+
+                elif function_name == "get_soldier_next_leave":
+                    db_result = database.get_soldier_next_leave(function_args.get("name"))
+
+                elif function_name == "get_soldiers_on_base_streak":
+                    db_result = database.get_soldiers_on_base_streak()
+
                 else:
                     db_result = []
                 

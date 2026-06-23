@@ -23,10 +23,11 @@ A soldier types a question in free Hebrew — the bot understands it, queries th
 ## Features
 
 - **Natural language queries** — Ask anything in free Hebrew: "Who is on base tomorrow?", "What is the status of platoon 2?", "How many vacation days does [soldier] have?"
-- **7 query tools** — Presence by date, soldier schedule, status filtering, department reports, commander status, role-based stats, and aggregate summaries
+- **10 query tools** — Presence by date, soldier schedule, status filtering, department reports, commander status, role-based stats, aggregate summaries, fairness reports, next leave lookup, and consecutive days on base
 - **Identity-based authentication** — Users authenticate with their personal military ID, verified against a whitelist pulled from Google Sheets
 - **Persistent sessions** — Once authenticated, a user is recognized permanently across bot restarts
 - **Smart text normalization** — Queries are immune to Hebrew quotation marks (גרשיים), making `מ"מ` and `ממ` equivalent
+- **Date range validation** — Queries outside the sheet's date range return a clear "not on operational duty" message instead of empty results
 - **Manual sync command** — `/sync` lets authorized users refresh the database on demand
 
 ---
@@ -59,7 +60,7 @@ A soldier types a question in free Hebrew — the bot understands it, queries th
 
 **Request flow:**
 1. User sends a message in Telegram
-2. `gpt-4o-mini` reads the message and decides which of 7 tools to invoke
+2. `gpt-4o-mini` reads the message and decides which of 10 tools to invoke
 3. `main.py` routes the call to the correct `database.py` function
 4. SQLite returns the result
 5. A second OpenAI call formats the data into a structured Hebrew response
@@ -108,6 +109,12 @@ Each soldier's full schedule is stored in a single column as a JSON string: `{"1
 
 **Anti-hallucination pattern**
 Instead of asking the AI to count list items (which leads to hallucinated numbers), every database function returns `{"total_count": N, "soldiers": [...]}`. The AI reads the count directly from the data.
+
+**Date range validation**
+Before routing any date-based query to the database, `main.py` calls `is_date_in_range()`. If the requested date falls outside the sheet's coverage, the function returns `{"out_of_range": true}` and the AI responds with a clear message — no empty results, no confusion.
+
+**Return day (`ח`) counts as present**
+Soldiers marked as returning (`ח`) on a given date are counted as present in all presence queries, ensuring accurate headcounts on transition days.
 
 **Two-call AI pattern**
 - Call 1: Parse the question and select the right tool + parameters
@@ -201,6 +208,18 @@ Not authorized → prompt to try again
 
 "איזה מפקדים נמצאים מחר?"
 → Returns command staff presence status
+
+"מתי דניס יוצא הביתה בפעם הבאה?"
+→ Returns next departure date and expected return date
+
+"מי על הקו הכי הרבה זמן?"
+→ Returns soldiers ranked by consecutive days on base
+
+"דוח הוגנות חופשות מחלקה 2"
+→ Returns all platoon soldiers ranked by vacation days received
+
+"כמה חיילים יש ב-1/1?"
+→ "התאריך המבוקש אינו בטווח הנתונים — הפלוגה אינה בתעסוקה מבצעית בתאריך זה"
 ```
 
 ---
